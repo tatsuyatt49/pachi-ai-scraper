@@ -1,3 +1,8 @@
+// puppeteer-extra と stealth プラグインを使用します
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -11,7 +16,6 @@ const supabase = (supabaseUrl && supabaseKey)
     })
   : null;
 
-// すでにアクセス実績のあるアナスロのホールデータをターゲットにする
 const TARGET_HALLS = [
   { 
     name: 'パラッツォ船橋店パートII', 
@@ -26,35 +30,35 @@ const TARGET_HALLS = [
 ];
 
 async function runAnaSloScraper() {
-  console.log('=== アナスロ経由・データ安定収集モード ===');
+  console.log('=== アナスロ経由・Stealth Puppeteerモード ===');
   const today = new Date().toISOString().split('T')[0];
+
+  // ステルスモードでブラウザを起動
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+
+  const page = await browser.newPage();
+  // 万全を期してユーザーエージェントを一般的なPCに偽装
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] データ収集開始...`);
     const scrapedRecords = [];
 
     try {
-      const response = await fetch(hall.url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        signal: AbortSignal.timeout(30000)
-      });
+      // ページにアクセス（403を回避）
+      await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+      // 念のため描画を少し待つ
+      await new Promise(r => setTimeout(r, 2000));
 
-      if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status}`);
-      }
-
-      const html = await response.text();
-      const textContent = html
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
-        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
-        .replace(/<[^>]+>/g, '\n');
-
+      // 画面上のテキストをまるごと取得して解析
+      const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
       const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
 
       for (const line of lines) {
-        // 台データ（ゲーム数やBB/RB）のパターンマッチング
+        // 台データのパターンマッチング
         const match = line.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
                       line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
@@ -105,6 +109,7 @@ async function runAnaSloScraper() {
     }
   }
 
+  await browser.close();
   console.log('\n=== データ収集完了 ===');
 }
 
