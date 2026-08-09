@@ -1,12 +1,17 @@
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
-// Supabase初期化
+// Supabase初期化（リアルタイムWebSocket接続を無効化してエラー回避）
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
+const supabase = (supabaseUrl && supabaseKey) 
+  ? createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false },
+      realtime: { timeout: 0 }
+    })
+  : null;
 
-// 遅延処理＆ヘッダー（ガード回避・バン防止）
+// 遅延処理＆ヘッダー（ガード回避用）
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const getRandomDelay = (min = 2000, max = 4000) => Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -17,7 +22,7 @@ const DEFAULT_HEADERS = {
   'Sec-Fetch-Mode': 'cors',
 };
 
-// 対象の3店舗リスト
+// 対象店舗リスト
 const TARGET_HALLS = [
   { name: 'パラッツォ船橋店パートII', id: '13130009' },
   { name: 'スーパーＤ’ステーション千葉みなと店', id: '10019024' },
@@ -42,7 +47,6 @@ async function fetchWithGuardBypass(url, options = {}, retries = 3) {
   }
 }
 
-// 差枚数計算
 function calculateDiff(games, bb, rb, rawDiff) {
   if (rawDiff !== undefined && rawDiff !== null) return Number(rawDiff);
   const outCoins = (games || 0) * 3;
@@ -58,7 +62,6 @@ async function runSite7Scraper() {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
-      // site7のホール詳細エンドポイント
       const targetUrl = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
       const requestHeaders = process.env.SITE7_COOKIE ? { 'Cookie': process.env.SITE7_COOKIE } : {};
 
@@ -67,7 +70,6 @@ async function runSite7Scraper() {
         headers: requestHeaders,
       });
 
-      // パース処理（レスポンスから抽出）
       const scrapedRecords = (rawData?.machines || []).map(item => {
         const diffCoins = calculateDiff(item.total_games, item.bb_count, item.rb_count, item.diff_coins);
         return {
@@ -86,7 +88,6 @@ async function runSite7Scraper() {
 
       console.log(`[${hall.name}] 取得完了: ${scrapedRecords.length} 件`);
 
-      // Supabaseへ保存
       if (supabase && scrapedRecords.length > 0) {
         const { error } = await supabase
           .from('site7_daidata')
