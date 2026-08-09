@@ -1,5 +1,4 @@
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase初期化
@@ -16,14 +15,12 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet Puppeteer ブラウザ操作取得モード ===');
+  console.log('=== DeltaNet Standard Puppeteer 取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
+    headless: "new",
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
 
   const page = await browser.newPage();
@@ -36,17 +33,15 @@ async function runDeltaNetScraper() {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
       await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // 出玉データボタンの特定
-      const buttons = await page.$$('a');
-      const targetLinks = [];
-
-      for (const btn of buttons) {
-        const text = await page.evaluate(el => el.textContent, btn);
-        if (text && text.includes('出玉データ')) {
-          const href = await page.evaluate(el => el.getAttribute('href'), btn);
-          if (href) targetLinks.push(href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`);
-        }
-      }
+      // 出玉データリンクの収集
+      const targetLinks = await page.$$eval('a', anchors => {
+        return anchors
+          .filter(a => a.textContent && a.textContent.includes('出玉データ'))
+          .map(a => {
+            const href = a.getAttribute('href');
+            return href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
+          });
+      });
 
       console.log(`[${hall.name}] 発見した出玉データリンク数: ${targetLinks.length} 個`);
 
@@ -89,7 +84,7 @@ async function runDeltaNetScraper() {
             }
           }
         } catch (e) {
-          // スキップ
+          // 個別エラーは無視して次へ
         }
       }
 
