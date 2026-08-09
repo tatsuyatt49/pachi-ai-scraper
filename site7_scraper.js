@@ -1,5 +1,4 @@
 const axios = require('axios');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -13,81 +12,68 @@ const supabase = (supabaseUrl && supabaseKey)
     })
   : null;
 
-// フリーの日本プロキシリスト
-const PROXY_LIST = [
-  'http://153.127.61.12:8080',
-  'http://133.242.149.208:8080',
-  'http://160.16.142.179:8080'
-];
-
-const DEFAULT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'ja-JP,ja;q=0.9',
-  'Referer': 'https://m.site777.jp/',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-};
-
 const TARGET_HALLS = [
   { name: 'パラッツォ船橋店パートII', id: '13130009' },
   { name: 'スーパーＤ’ステーション千葉みなと店', id: '10019024' },
   { name: 'マルハン千葉みなと店', id: '10015018' }
 ];
 
-async function fetchWithProxy(url, cookie) {
-  let lastError = null;
-  for (const proxyUrl of PROXY_LIST) {
-    try {
-      const agent = new HttpsProxyAgent(proxyUrl);
-      const headers = { ...DEFAULT_HEADERS };
-      if (cookie) headers['Cookie'] = cookie;
-
-      const response = await axios.get(url, {
-        httpsAgent: agent,
-        httpAgent: agent,
-        headers: headers,
-        timeout: 10000
-      });
-      return response.data;
-    } catch (err) {
-      lastError = err;
-      continue;
-    }
-  }
-  throw lastError || new Error('全プロキシでの接続に失敗しました');
-}
-
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (日本プロキシ経由) ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (高速直接通信版) ===');
   const today = new Date().toISOString().split('T')[0];
   const cookie = process.env.SITE7_COOKIE;
+
+  if (!cookie) {
+    console.warn('⚠️ SITE7_COOKIE が設定されていません。');
+  }
+
+  // サイトセブンが403を出さずにレスポンスを返すための完全なヘッダー構成
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'ja-JP,ja;q=0.9',
+    'Referer': 'https://m.site777.jp/f/D0300.do',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Cookie': cookie || ''
+  };
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
+      // site777の無料版JSONレスポンス用URL
       const targetUrl = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
-      const rawData = await fetchWithProxy(targetUrl, cookie);
-
-      const scrapedRecords = (rawData?.machines || []).map(item => {
-        const outCoins = (item.total_games || 0) * 3;
-        const inCoins = ((item.bb_count || 0) * 240) + ((item.rb_count || 0) * 96);
-        const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
-
-        return {
-          date: today,
-          hall_id: hall.id,
-          hall_name: hall.name,
-          machine_no: item.machine_no,
-          model_name: item.model_name || '不明機種',
-          total_games: item.total_games || 0,
-          bb_count: item.bb_count || 0,
-          rb_count: item.rb_count || 0,
-          diff_coins: diffCoins,
-          updated_at: new Date()
-        };
+      
+      const response = await axios.get(targetUrl, {
+        headers: headers,
+        timeout: 8000 // 8秒でタイムアウト設定
       });
+
+      const rawData = response.data;
+      let scrapedRecords = [];
+
+      if (typeof rawData === 'object' && rawData !== null) {
+        // レスポンスがJSONの場合の解析
+        const list = rawData.machines || rawData.list || [];
+        scrapedRecords = list.map(item => {
+          const outCoins = (item.total_games || 0) * 3;
+          const inCoins = ((item.bb_count || 0) * 240) + ((item.rb_count || 0) * 96);
+          const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
+
+          return {
+            date: today,
+            hall_id: hall.id,
+            hall_name: hall.name,
+            machine_no: item.machine_no || item.daiban,
+            model_name: item.model_name || item.kisyu_name || '不明機種',
+            total_games: Number(item.total_games || item.gcount || 0),
+            bb_count: Number(item.bb_count || item.bb || 0),
+            rb_count: Number(item.rb_count || item.rb || 0),
+            diff_coins: diffCoins,
+            updated_at: new Date()
+          };
+        });
+      }
 
       console.log(`[${hall.name}] 取得完了: ${scrapedRecords.length} 件`);
 
