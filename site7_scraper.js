@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
-// Node.js 20環境用：wsを明示的に指定してSupabase初期化
+// Node.js 20環境用 Supabase初期化
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) 
@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet Standard Puppeteer 取得モード ===');
+  console.log('=== DeltaNet リンク全自動検出取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -35,29 +35,50 @@ async function runDeltaNetScraper() {
 
     try {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+      await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // 出玉データリンクの収集
-      const targetLinks = await page.$$eval('a', anchors => {
-        return anchors
-          .filter(a => a.textContent && a.textContent.includes('出玉データ'))
-          .map(a => {
-            const href = a.getAttribute('href');
-            return href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
-          });
-      });
+      // リンク判定条件を拡大（ナビ系を除外した全内部リンクを取得）
+      const targetLinks = await page.$$eval('a', (anchors, currentUrl) => {
+        const links = [];
+        const ignoreKeywords = ['Top.do', 'FAQ', 'Mypage', 'Login', 'rule', 'privacy', 'index'];
 
-      console.log(`[${hall.name}] 発見した出玉データリンク数: ${targetLinks.length} 個`);
+        for (const a of anchors) {
+          const href = a.getAttribute('href');
+          const text = (a.textContent || '').trim();
 
-      const limit = Math.min(targetLinks.length, 10);
+          if (!href || href === '#' || href.startsWith('javascript:void')) continue;
+
+          const isIgnore = ignoreKeywords.some(kw => href.includes(kw));
+          if (!isIgnore && (href.includes('do') || href.includes('hall') || text.includes('出玉') || text.includes('データ'))) {
+            const fullUrl = href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
+            if (fullUrl !== currentUrl && !links.includes(fullUrl)) {
+              links.push(fullUrl);
+            }
+          }
+        }
+        return links;
+      }, hallUrl);
+
+      console.log(`[${hall.name}] 検出した対象リンク数: ${targetLinks.length} 個`);
+
+      // 万が一リンクが取れない場合はトップページ自体を解析候補に追加
+      if (targetLinks.length === 0) {
+        targetLinks.push(hallUrl);
+      }
+
+      const limit = Math.min(targetLinks.length, 15);
 
       for (let i = 0; i < limit; i++) {
         try {
           await page.goto(targetLinks[i], { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-          const rows = await page.$$eval('tr', trs => trs.map(tr => tr.innerText.replace(/\s+/g, ' ').trim()));
+          const rows = await page.$$eval('tr, div', elements => 
+            elements.map(el => el.innerText ? el.innerText.replace(/\s+/g, ' ').trim() : '')
+          );
 
           for (const text of rows) {
+            if (!text) continue;
+
             const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
                           text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
@@ -88,7 +109,7 @@ async function runDeltaNetScraper() {
             }
           }
         } catch (e) {
-          // 個別エラーは無視
+          // 個別リンク読み込みエラーはスキップ
         }
       }
 
