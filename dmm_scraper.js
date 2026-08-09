@@ -26,7 +26,7 @@ const TARGET_HALLS = [
 ];
 
 async function runScraper() {
-  console.log('=== ScraperAPI 経由でのデータ取得を開始 ===');
+  console.log('=== ScraperAPI（JSレンダリング有効）でのデータ取得を開始 ===');
   const today = new Date().toISOString().split('T')[0];
 
   if (!scraperApiKey) {
@@ -39,8 +39,8 @@ async function runScraper() {
     const scrapedRecords = [];
 
     try {
-      // ScraperAPIのURLを構築（ブロックを自動回避してHTMLを取得）
-      const scraperUrl = `https://api.scraperapi.com?api_key=${scraperApiKey}&url=${encodeURIComponent(hall.url)}`;
+      // &render=true を追加してJavaScriptの描画を有効化
+      const scraperUrl = `https://api.scraperapi.com?api_key=${scraperApiKey}&render=true&url=${encodeURIComponent(hall.url)}`;
       
       const response = await fetch(scraperUrl);
       if (!response.ok) {
@@ -50,11 +50,10 @@ async function runScraper() {
       const htmlText = await response.text();
       console.log(`${hall.name}: HTML取得成功 (文字数: ${htmlText.length})`);
 
-      // HTMLタグを大まかに除去してテキスト行に変換
+      // HTMLタグを簡易的に除去してテキスト行に分解
       const lines = htmlText.split('\n').map(l => l.replace(/<[^>]*>/g, '').trim()).filter(Boolean);
 
       for (const line of lines) {
-        // 台番号、ゲーム数、BB、RBが含まれる行をマッチング
         const match = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
 
         if (match) {
