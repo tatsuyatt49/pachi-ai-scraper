@@ -1,11 +1,11 @@
 const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 
-// Supabase初期化
+// Supabase初期化（Supabase Clientの接続エラー回避設定）
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) 
-  ? createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } })
+  ? createClient(supabaseUrl, supabaseKey)
   : null;
 
 const TARGET_HALLS = [
