@@ -29,7 +29,7 @@ const TARGET_HALLS = [
 ];
 
 async function runAnaSloScraper() {
-  console.log('=== アナスロ経由・要素直接取得モード ===');
+  console.log('=== アナスロ経由・台データ完全取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -46,27 +46,27 @@ async function runAnaSloScraper() {
 
     try {
       await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      await new Promise(r => setTimeout(r, 3000));
+      // データの動的描画をしっかり待つ
+      await new Promise(r => setTimeout(r, 4000));
 
-      // ページ内のテーブル行（tr）やリストからテキストを個別に取得
-      const rawData = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll('tr, .data-row, li'));
-        return rows.map(row => row.innerText.replace(/\s+/g, ' ').trim());
+      // ページ内のすべてのテーブル行（tr）からテキストを抽出
+      const rowsData = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('table tr, .data-table tr, .spec-table tr'));
+        return rows.map(row => row.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean);
       });
 
-      console.log(`[${hall.name}] 取得した要素行数: ${rawData.length} 行`);
+      console.log(`[${hall.name}] 検出したテーブル行数: ${rowsData.length} 行`);
 
-      for (const line of rawData) {
-        // 連続する数字の塊（台番号、ゲーム数、BB、RBなど）を柔軟にキャッチするパターン
-        const matches = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
+      for (const line of rowsData) {
+        // 「台番」「ゲーム数」「BB回数」「RB回数」などが含まれる行をマッチング
+        const match = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
 
-        if (matches) {
-          const machineNo = matches[1];
-          const totalGames = Number(matches[2]);
-          const bbCount = Number(matches[3]);
-          const rbCount = Number(matches[4]);
+        if (match) {
+          const machineNo = match[1];
+          const totalGames = Number(match[2]);
+          const bbCount = Number(match[3]);
+          const rbCount = Number(match[4]);
 
-          // スロットのデータとして現実的な数値範囲のものだけを対象にする
           if (totalGames >= 0 && totalGames < 15000 && bbCount < 100 && rbCount < 100) {
             const outCoins = totalGames * 3;
             const inCoins = (bbCount * 240) + (rbCount * 96);
