@@ -1,6 +1,4 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
-const iconv = require('iconv-lite');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -21,9 +19,8 @@ const TARGET_HALLS = [
 ];
 
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (Shift_JISデコード完全版) ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (APIエンドポイント版) ===');
   const today = new Date().toISOString().split('T')[0];
-  const cookie = process.env.SITE7_COOKIE;
   const apiKey = process.env.SCRAPERAPI_KEY;
 
   if (!apiKey) {
@@ -35,72 +32,54 @@ async function runSite7Scraper() {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
-      const site7Url = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
-      const proxyApiUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(site7Url)}&country_code=jp&keep_headers=true`;
+      // 誰でもアクセス可能なデータAPI URL
+      const site7ApiUrl = `https://m.site777.jp/f/D0301.do?pmc=${hall.id}&clc=03`;
+      const proxyApiUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(site7ApiUrl)}&country_code=jp`;
 
-      const response = await axios.get(proxyApiUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Cookie': cookie || ''
-        },
-        responseType: 'arraybuffer',
-        timeout: 30000
-      });
+      const response = await axios.get(proxyApiUrl, { timeout: 30000 });
 
-      // Shift_JISを完全デコード
-      const htmlText = iconv.decode(Buffer.from(response.data), 'shift_jis');
-      const $ = cheerio.load(htmlText);
-
-      const pageTitle = $('title').text().trim();
-      console.log(`[${hall.name}] 取得ページタイトル:`, pageTitle);
+      let data = response.data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch (e) {}
+      }
 
       const scrapedRecords = [];
 
-      // ページ内のすべてのテキスト要素からデータ抽出
-      $('a, tr, div, li').each((_, element) => {
-        const text = $(element).text().replace(/\s+/g, ' ').trim();
-        
-        // 数値の組み合わせパターン（台番号、G数、BB、RB）を抽出
-        const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) || 
-                      text.match(/(\d{3,4})\s*(\d+)\s*(\d+)\s*(\d+)/);
+      // JSONデータの抽出処理
+      const list = Array.isArray(data) ? data : (data.list || data.machines || []);
 
-        if (match) {
-          const machineNo = match[1];
-          const totalGames = Number(match[2] || 0);
-          const bbCount = Number(match[3] || 0);
-          const rbCount = Number(match[4] || 0);
+      for (const item of list) {
+        const machineNo = String(item.machine_no || item.daiban || item.台番号 || '');
+        if (!machineNo) continue;
 
-          if (totalGames > 0 || bbCount > 0 || rbCount > 0) {
-            const outCoins = totalGames * 3;
-            const inCoins = (bbCount * 240) + (rbCount * 96);
-            const diffCoins = inCoins - outCoins;
+        const totalGames = Number(item.total_games || item.gcount || 0);
+        const bbCount = Number(item.bb_count || item.bb || 0);
+        const rbCount = Number(item.rb_count || item.rb || 0);
 
-            scrapedRecords.push({
-              date: today,
-              hall_id: hall.id,
-              hall_name: hall.name,
-              machine_no: machineNo,
-              model_name: '対象機種',
-              total_games: totalGames,
-              bb_count: bbCount,
-              rb_count: rbCount,
-              diff_coins: diffCoins,
-              updated_at: new Date()
-            });
-          }
-        }
-      });
+        const outCoins = totalGames * 3;
+        const inCoins = (bbCount * 240) + (rbCount * 96);
+        const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
 
-      // 重複台番号の除去
-      const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
+        scrapedRecords.push({
+          date: today,
+          hall_id: hall.id,
+          hall_name: hall.name,
+          machine_no: machineNo,
+          model_name: item.model_name || item.kisyu_name || '不明機種',
+          total_games: totalGames,
+          bb_count: bbCount,
+          rb_count: rbCount,
+          diff_coins: diffCoins,
+          updated_at: new Date()
+        });
+      }
 
-      console.log(`[${hall.name}] 抽出成功: ${uniqueRecords.length} 件`);
+      console.log(`[${hall.name}] 取得成功: ${scrapedRecords.length} 件`);
 
-      if (supabase && uniqueRecords.length > 0) {
+      if (supabase && scrapedRecords.length > 0) {
         const { error } = await supabase
           .from('site7_daidata')
-          .upsert(uniqueRecords, { onConflict: 'date, hall_id, machine_no' });
+          .upsert(scrapedRecords, { onConflict: 'date, hall_id, machine_no' });
 
         if (error) {
           console.error(`[${hall.name}] Supabase保存エラー:`, error.message);
