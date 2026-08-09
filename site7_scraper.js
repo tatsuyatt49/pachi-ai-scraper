@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet 全フレーム＆UA偽装取得モード ===');
+  console.log('=== DeltaNet フォーム解析＆直接抽出モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -28,10 +28,7 @@ async function runDeltaNetScraper() {
   });
 
   const page = await browser.newPage();
-  
-  // User-Agentを一般的なPCブラウザに偽装
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-  await page.setViewport({ width: 1280, height: 800 });
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
@@ -41,80 +38,64 @@ async function runDeltaNetScraper() {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
       await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // 全フレーム（iframe含む）からリンクを収集
-      const collectedLinks = new Set();
-      const frames = page.frames();
+      // 1. トップページ/直接表示領域からデータを抽出
+      const extractDataFromCurrentPage = async () => {
+        const pageText = await page.evaluate(() => document.body.innerText || '');
+        const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
 
-      for (const frame of frames) {
-        try {
-          const frameLinks = await frame.$$eval('a', anchors => {
-            return anchors.map(a => {
-              const href = a.getAttribute('href');
-              if (!href || href.startsWith('javascript') || href === '#') return null;
-              return href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
-            }).filter(Boolean);
-          });
-          frameLinks.forEach(link => collectedLinks.add(link));
-        } catch (e) {
-          // フレームアクセスのエラーはスキップ
-        }
-      }
+        for (const line of lines) {
+          // 台番号 / G数 / BB / RB などのパターンマッチ
+          const match = line.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
+                        line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
-      const targetLinks = Array.from(collectedLinks);
-      console.log(`[${hall.name}] 検出した対象リンク数: ${targetLinks.length} 個`);
+          if (match) {
+            const machineNo = match[1];
+            const totalGames = Number(match[2] || 0);
+            const bbCount = Number(match[3] || 0);
+            const rbCount = Number(match[4] || 0);
 
-      // リンクが取得できない場合のフォールバック（直接トップ画面を解析）
-      if (targetLinks.length === 0) {
-        targetLinks.push(hallUrl);
-      }
+            if (totalGames > 0 || bbCount > 0) {
+              const outCoins = totalGames * 3;
+              const inCoins = (bbCount * 240) + (rbCount * 96);
+              const diffCoins = inCoins - outCoins;
 
-      const limit = Math.min(targetLinks.length, 15);
-
-      for (let i = 0; i < limit; i++) {
-        try {
-          await page.goto(targetLinks[i], { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-          // メイン画面＋フレーム両方からテキスト取得
-          for (const frame of page.frames()) {
-            const rows = await frame.$$eval('tr, div, td', elements => 
-              elements.map(el => el.innerText ? el.innerText.replace(/\s+/g, ' ').trim() : '')
-            );
-
-            for (const text of rows) {
-              if (!text) continue;
-
-              const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
-                            text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
-
-              if (match) {
-                const machineNo = match[1];
-                const totalGames = Number(match[2] || 0);
-                const bbCount = Number(match[3] || 0);
-                const rbCount = Number(match[4] || 0);
-
-                if (totalGames > 0 || bbCount > 0) {
-                  const outCoins = totalGames * 3;
-                  const inCoins = (bbCount * 240) + (rbCount * 96);
-                  const diffCoins = inCoins - outCoins;
-
-                  scrapedRecords.push({
-                    date: today,
-                    hall_id: hall.id,
-                    hall_name: hall.name,
-                    machine_no: machineNo,
-                    model_name: '対象機種',
-                    total_games: totalGames,
-                    bb_count: bbCount,
-                    rb_count: rbCount,
-                    diff_coins: diffCoins,
-                    updated_at: new Date()
-                  });
-                }
-              }
+              scrapedRecords.push({
+                date: today,
+                hall_id: hall.id,
+                hall_name: hall.name,
+                machine_no: machineNo,
+                model_name: '対象機種',
+                total_games: totalGames,
+                bb_count: bbCount,
+                rb_count: rbCount,
+                diff_coins: diffCoins,
+                updated_at: new Date()
+              });
             }
           }
+        }
+      };
+
+      await extractDataFromCurrentPage();
+
+      // 2. ページ内のフォームやサブミットボタンを自動実行して下層ページを探索
+      const forms = await page.$$('form');
+      console.log(`[${hall.name}] 発見したフォーム数: ${forms.length}`);
+
+      for (let i = 0; i < Math.min(forms.length, 5); i++) {
+        try {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+            page.evaluate((idx) => {
+              const f = document.forms[idx];
+              if (f) f.submit();
+            }, i)
+          ]);
+
+          await extractDataFromCurrentPage();
+          await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
         } catch (e) {
-          // 個別ページの取得エラーは無視
+          // 個別フォーム処理エラーはスキップ
         }
       }
 
