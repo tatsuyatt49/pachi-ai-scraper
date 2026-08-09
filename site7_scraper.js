@@ -1,4 +1,5 @@
-const { chromium } = require('playwright');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase初期化
@@ -15,44 +16,46 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet Playwright ブラウザ操作取得モード ===');
+  console.log('=== DeltaNet Puppeteer ブラウザ操作取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  const browser = await puppeteer.launch({
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
   });
-  const page = await context.newPage();
+
+  const page = await browser.newPage();
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
     const scrapedRecords = [];
 
     try {
-      // 店舗のトップ（機種一覧画面）を開く
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // 「出玉データ」ボタン/リンク要素をすべて特定
-      const dataButtons = await page.$$('a:has-text("出玉データ"), input[value*="出玉"]');
-      console.log(`[${hall.name}] 発見した出玉データボタン数: ${dataButtons.length} 個`);
+      // 出玉データボタンの特定
+      const buttons = await page.$$('a');
+      const targetLinks = [];
 
-      // 先頭から順に数機種分を巡回してデータを取得（タイムアウト防止のため最大10機種）
-      const limit = Math.min(dataButtons.length, 10);
+      for (const btn of buttons) {
+        const text = await page.evaluate(el => el.textContent, btn);
+        if (text && text.includes('出玉データ')) {
+          const href = await page.evaluate(el => el.getAttribute('href'), btn);
+          if (href) targetLinks.push(href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`);
+        }
+      }
+
+      console.log(`[${hall.name}] 発見した出玉データリンク数: ${targetLinks.length} 個`);
+
+      const limit = Math.min(targetLinks.length, 10);
 
       for (let i = 0; i < limit; i++) {
         try {
-          // 再度機種一覧へ戻って対象ボタンをクリック
-          await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          const buttons = await page.$$('a:has-text("出玉データ"), input[value*="出玉"]');
-          if (!buttons[i]) continue;
+          await page.goto(targetLinks[i], { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-          await Promise.all([
-            page.waitForNavigation({ timeout: 15000 }).catch(() => {}),
-            buttons[i].click()
-          ]);
-
-          // ページ内のテーブル行を取得して数値を解析
           const rows = await page.$$eval('tr', trs => trs.map(tr => tr.innerText.replace(/\s+/g, ' ').trim()));
 
           for (const text of rows) {
@@ -86,11 +89,10 @@ async function runDeltaNetScraper() {
             }
           }
         } catch (e) {
-          // 個別ページの取得失敗はスキップして次へ
+          // スキップ
         }
       }
 
-      // 重複台の排除
       const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
       console.log(`[${hall.name}] 取得成功: ${uniqueRecords.length} 件`);
 
