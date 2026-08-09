@@ -1,8 +1,9 @@
 const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
-// Supabase初期化（Node.js 20用のWebSocket指定を追加）
+// Supabase初期化
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) 
@@ -12,67 +13,68 @@ const supabase = (supabaseUrl && supabaseKey)
     })
   : null;
 
-// 遅延処理＆ヘッダー（ガード回避用）
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const getRandomDelay = (min = 2000, max = 4000) => Math.floor(Math.random() * (max - min + 1)) + min;
+// フリーの日本プロキシリスト
+const PROXY_LIST = [
+  'http://153.127.61.12:8080',
+  'http://133.242.149.208:8080',
+  'http://160.16.142.179:8080'
+];
 
 const DEFAULT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
   'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'ja-JP,ja;q=0.9',
   'Referer': 'https://m.site777.jp/',
   'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-origin',
 };
 
-// 対象店舗リスト
 const TARGET_HALLS = [
   { name: 'パラッツォ船橋店パートII', id: '13130009' },
   { name: 'スーパーＤ’ステーション千葉みなと店', id: '10019024' },
   { name: 'マルハン千葉みなと店', id: '10015018' }
 ];
 
-async function fetchWithGuardBypass(url, options = {}, retries = 3) {
-  for (let i = 0; i < retries; i++) {
+async function fetchWithProxy(url, cookie) {
+  let lastError = null;
+  for (const proxyUrl of PROXY_LIST) {
     try {
-      await delay(getRandomDelay());
-      const response = await axios({
-        url,
-        ...options,
-        headers: { ...DEFAULT_HEADERS, ...options.headers },
-        timeout: 15000,
+      const agent = new HttpsProxyAgent(proxyUrl);
+      const headers = { ...DEFAULT_HEADERS };
+      if (cookie) headers['Cookie'] = cookie;
+
+      const response = await axios.get(url, {
+        httpsAgent: agent,
+        httpAgent: agent,
+        headers: headers,
+        timeout: 10000
       });
       return response.data;
-    } catch (error) {
-      if (i === retries - 1) throw error;
-      await delay((i + 1) * 3000);
+    } catch (err) {
+      lastError = err;
+      continue;
     }
   }
-}
-
-function calculateDiff(games, bb, rb, rawDiff) {
-  if (rawDiff !== undefined && rawDiff !== null) return Number(rawDiff);
-  const outCoins = (games || 0) * 3;
-  const inCoins = ((bb || 0) * 240) + ((rb || 0) * 96);
-  return inCoins - outCoins;
+  throw lastError || new Error('全プロキシでの接続に失敗しました');
 }
 
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (日本プロキシ経由) ===');
   const today = new Date().toISOString().split('T')[0];
+  const cookie = process.env.SITE7_COOKIE;
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
       const targetUrl = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
-      const requestHeaders = process.env.SITE7_COOKIE ? { 'Cookie': process.env.SITE7_COOKIE } : {};
-
-      const rawData = await fetchWithGuardBypass(targetUrl, {
-        method: 'GET',
-        headers: requestHeaders,
-      });
+      const rawData = await fetchWithProxy(targetUrl, cookie);
 
       const scrapedRecords = (rawData?.machines || []).map(item => {
-        const diffCoins = calculateDiff(item.total_games, item.bb_count, item.rb_count, item.diff_coins);
+        const outCoins = (item.total_games || 0) * 3;
+        const inCoins = ((item.bb_count || 0) * 240) + ((item.rb_count || 0) * 96);
+        const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
+
         return {
           date: today,
           hall_id: hall.id,
