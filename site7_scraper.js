@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet フォーム解析＆直接抽出モード ===');
+  console.log('=== DeltaNet 全要素クリック＆JS直接実行モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -38,13 +38,12 @@ async function runDeltaNetScraper() {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
       await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // 1. トップページ/直接表示領域からデータを抽出
-      const extractDataFromCurrentPage = async () => {
-        const pageText = await page.evaluate(() => document.body.innerText || '');
-        const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
+      // テキスト抽出処理
+      const parsePageData = async () => {
+        const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
+        const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
 
         for (const line of lines) {
-          // 台番号 / G数 / BB / RB などのパターンマッチ
           const match = line.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
                         line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
@@ -76,26 +75,29 @@ async function runDeltaNetScraper() {
         }
       };
 
-      await extractDataFromCurrentPage();
+      // 1. トップページ解析
+      await parsePageData();
 
-      // 2. ページ内のフォームやサブミットボタンを自動実行して下層ページを探索
-      const forms = await page.$$('form');
-      console.log(`[${hall.name}] 発見したフォーム数: ${forms.length}`);
+      // 2. onclick属性またはJavaScript呼び出しを行う全要素（ボタン・画像・リンク・div）を収集
+      const clickables = await page.$$('[onclick], input[type="button"], input[type="submit"], button, .button');
+      console.log(`[${hall.name}] 発見したクリック可能要素: ${clickables.length} 個`);
 
-      for (let i = 0; i < Math.min(forms.length, 5); i++) {
+      const limit = Math.min(clickables.length, 10);
+
+      for (let i = 0; i < limit; i++) {
         try {
-          await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
-            page.evaluate((idx) => {
-              const f = document.forms[idx];
-              if (f) f.submit();
-            }, i)
-          ]);
+          const targets = await page.$$('[onclick], input[type="button"], input[type="submit"], button, .button');
+          if (targets[i]) {
+            await Promise.all([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
+              targets[i].click()
+            ]);
 
-          await extractDataFromCurrentPage();
-          await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+            await parsePageData();
+            await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+          }
         } catch (e) {
-          // 個別フォーム処理エラーはスキップ
+          // クリック失敗等はスキップ
         }
       }
 
