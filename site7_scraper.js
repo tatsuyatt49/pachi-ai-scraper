@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet 全要素クリック＆JS直接実行モード ===');
+  console.log('=== DeltaNet 追従＆確実遷移モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -36,9 +36,11 @@ async function runDeltaNetScraper() {
 
     try {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+      // リダイレクト完了までしっかり待機 (networkidle0)
+      await page.goto(hallUrl, { waitUntil: 'networkidle0', timeout: 35000 });
+      await page.waitForTimeout(3000); // 描画待機
 
-      // テキスト抽出処理
+      // テキストデータ解析関数
       const parsePageData = async () => {
         const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
         const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
@@ -75,29 +77,34 @@ async function runDeltaNetScraper() {
         }
       };
 
-      // 1. トップページ解析
+      // 1. 転送先初期ページのテキスト解析
       await parsePageData();
 
-      // 2. onclick属性またはJavaScript呼び出しを行う全要素（ボタン・画像・リンク・div）を収集
-      const clickables = await page.$$('[onclick], input[type="button"], input[type="submit"], button, .button');
-      console.log(`[${hall.name}] 発見したクリック可能要素: ${clickables.length} 個`);
+      // 2. DOM全体からクリック可能な全要素のセレクタを取得
+      const clickables = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll('a, button, input, div[onclick], tr[onclick]'));
+        return els.map((el, index) => ({
+          index,
+          tag: el.tagName,
+          text: (el.innerText || el.value || '').trim().replace(/\s+/g, ' ')
+        })).filter(item => item.text.length > 0 && item.text.length < 50);
+      });
 
-      const limit = Math.min(clickables.length, 10);
+      console.log(`[${hall.name}] 発見したクリック候補要素: ${clickables.length} 個`);
 
+      // 3. 候補要素を順番に叩いて巡回
+      const limit = Math.min(clickables.length, 8);
       for (let i = 0; i < limit; i++) {
         try {
-          const targets = await page.$$('[onclick], input[type="button"], input[type="submit"], button, .button');
-          if (targets[i]) {
-            await Promise.all([
-              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
-              targets[i].click()
-            ]);
+          await page.evaluate((idx) => {
+            const els = document.querySelectorAll('a, button, input, div[onclick], tr[onclick]');
+            if (els[idx]) els[idx].click();
+          }, clickables[i].index);
 
-            await parsePageData();
-            await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-          }
+          await page.waitForTimeout(2000);
+          await parsePageData();
         } catch (e) {
-          // クリック失敗等はスキップ
+          // 単一要素のクリックエラーはスキップ
         }
       }
 
