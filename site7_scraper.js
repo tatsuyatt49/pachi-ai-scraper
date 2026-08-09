@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const iconv = require('iconv-lite');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -20,7 +21,7 @@ const TARGET_HALLS = [
 ];
 
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (HTMLデバッグ調査版) ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (Shift_JISデコード完全版) ===');
   const today = new Date().toISOString().split('T')[0];
   const cookie = process.env.SITE7_COOKIE;
   const apiKey = process.env.SCRAPERAPI_KEY;
@@ -47,55 +48,65 @@ async function runSite7Scraper() {
         timeout: 30000
       });
 
-      const decoder = new TextDecoder('shift-jis');
-      const htmlText = decoder.decode(response.data);
+      // Shift_JISを完全デコード
+      const htmlText = iconv.decode(Buffer.from(response.data), 'shift_jis');
       const $ = cheerio.load(htmlText);
 
-      // --- デバッグログ出力 ---
-      console.log(`[${hall.name}] ページタイトル:`, $('title').text().trim());
-      
-      const bodyText = $('body').text().replace(/\s+/g, ' ').substring(0, 200);
-      console.log(`[${hall.name}] 本文冒頭:`, bodyText);
-
-      // テーブル行・リンク・DIV要素の数を確認
-      console.log(`[${hall.name}] 発見したtr要素: ${$('tr').length}個 / a要素: ${$('a').length}個 / div: ${$('div').length}個`);
+      const pageTitle = $('title').text().trim();
+      console.log(`[${hall.name}] 取得ページタイトル:`, pageTitle);
 
       const scrapedRecords = [];
 
-      // 全ての要素から台番号っぽい記述を探す
-      $('tr, div, li, a').each((_, element) => {
-        const text = $(element).text().replace(/\s+/g, ' ');
-        if (text.includes('番台') || text.includes('台番号') || /\b\d{3,4}\b/.test(text)) {
-          const numbers = text.match(/\d+/g) || [];
-          if (numbers.length >= 2) {
-            const machineNo = numbers[0];
-            const totalGames = Number(numbers[1] || 0);
-            const bbCount = Number(numbers[2] || 0);
-            const rbCount = Number(numbers[3] || 0);
+      // ページ内のすべてのテキスト要素からデータ抽出
+      $('a, tr, div, li').each((_, element) => {
+        const text = $(element).text().replace(/\s+/g, ' ').trim();
+        
+        // 数値の組み合わせパターン（台番号、G数、BB、RB）を抽出
+        const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) || 
+                      text.match(/(\d{3,4})\s*(\d+)\s*(\d+)\s*(\d+)/);
 
-            if (machineNo.length >= 3 && totalGames > 0) {
-              scrapedRecords.push({
-                date: today,
-                hall_id: hall.id,
-                hall_name: hall.name,
-                machine_no: machineNo,
-                model_name: '対象機種',
-                total_games: totalGames,
-                bb_count: bbCount,
-                rb_count: rbCount,
-                diff_coins: (bbCount * 240 + rbCount * 96) - (totalGames * 3),
-                updated_at: new Date()
-              });
-            }
+        if (match) {
+          const machineNo = match[1];
+          const totalGames = Number(match[2] || 0);
+          const bbCount = Number(match[3] || 0);
+          const rbCount = Number(match[4] || 0);
+
+          if (totalGames > 0 || bbCount > 0 || rbCount > 0) {
+            const outCoins = totalGames * 3;
+            const inCoins = (bbCount * 240) + (rbCount * 96);
+            const diffCoins = inCoins - outCoins;
+
+            scrapedRecords.push({
+              date: today,
+              hall_id: hall.id,
+              hall_name: hall.name,
+              machine_no: machineNo,
+              model_name: '対象機種',
+              total_games: totalGames,
+              bb_count: bbCount,
+              rb_count: rbCount,
+              diff_coins: diffCoins,
+              updated_at: new Date()
+            });
           }
         }
       });
 
-      console.log(`[${hall.name}] 抽出結果: ${scrapedRecords.length} 件`);
+      // 重複台番号の除去
+      const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
 
-      if (supabase && scrapedRecords.length > 0) {
-        await supabase.from('site7_daidata').upsert(scrapedRecords, { onConflict: 'date, hall_id, machine_no' });
-        console.log(`[${hall.name}] Supabaseへ保存成功！`);
+      console.log(`[${hall.name}] 抽出成功: ${uniqueRecords.length} 件`);
+
+      if (supabase && uniqueRecords.length > 0) {
+        const { error } = await supabase
+          .from('site7_daidata')
+          .upsert(uniqueRecords, { onConflict: 'date, hall_id, machine_no' });
+
+        if (error) {
+          console.error(`[${hall.name}] Supabase保存エラー:`, error.message);
+        } else {
+          console.log(`[${hall.name}] Supabaseへ保存成功！`);
+        }
       }
     } catch (error) {
       console.error(`[${hall.name}] 収集エラー:`, error.message);
