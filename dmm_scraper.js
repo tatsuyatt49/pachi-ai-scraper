@@ -28,7 +28,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDmmScraper() {
-  console.log('【アナスロ】データ抽出・デバッグモード開始...');
+  console.log('【アナスロ】データ抽出・待機強化版を開始...');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -44,28 +44,38 @@ async function runDmmScraper() {
     const scrapedRecords = [];
 
     try {
-      await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 40000 });
+      // ネットワーク通信が落ち着くまでしっかり待つ
+      await page.goto(hall.url, { waitUntil: 'networkidle0', timeout: 45000 });
+      
+      // テーブル要素が画面に出現するまで最大10秒待機
+      try {
+        await page.waitForSelector('table', { timeout: 10000 });
+      } catch (e) {
+        console.log(`${hall.name}: テーブル要素の待機タイムアウト。追加で待機します...`);
+      }
+      
+      // 念のためさらに4秒待機して描画を確実に完了させる
       await new Promise(r => setTimeout(r, 4000));
 
-      // ページ内のすべてのテキスト行を取得
-      const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
-      const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
+      // ページ内のすべてのテーブル行（tr）からテキストを抽出
+      const rowsData = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('tr'));
+        return rows.map(r => r.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean);
+      });
 
-      console.log(`${hall.name}: 取得した総行数 = ${lines.length} 行`);
+      console.log(`${hall.name}: 検出したテーブル行数 = ${rowsData.length} 行`);
 
-      let matchedCount = 0;
-      for (const line of lines) {
-        // 台番号とゲーム数、BB、RBが含まれる行を探索
-        const match = line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
+      for (const line of rowsData) {
+        // 台番号、ゲーム数、BB、RBの並びをマッチング
+        const match = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
 
         if (match) {
-          matchedCount++;
           const machineNo = match[1];
           const totalGames = Number(match[2]);
           const bbCount = Number(match[3]);
           const rbCount = Number(match[4]);
 
-          if (totalGames >= 0 && totalGames <= 12000) {
+          if (totalGames >= 0 && totalGames <= 12000 && bbCount <= 100 && rbCount <= 100) {
             const outCoins = totalGames * 3;
             const inCoins = (bbCount * 240) + (rbCount * 96);
             const diffCoins = inCoins - outCoins;
@@ -86,9 +96,8 @@ async function runDmmScraper() {
         }
       }
 
-      console.log(`${hall.name}: パターンマッチした行数 = ${matchedCount} 件`);
       const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
-      console.log(`${hall.name}: 最終有効データ数 = ${uniqueRecords.length} 件`);
+      console.log(`${hall.name}: 抽出成功した有効データ数 = ${uniqueRecords.length} 件`);
 
       if (supabase && uniqueRecords.length > 0) {
         const { error } = await supabase
