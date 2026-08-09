@@ -1,16 +1,17 @@
 name: Daily Pachi Scraper
 
 on:
+  workflow_dispatch:
   schedule:
-    # 毎日日本時間の午前8時（UTC 23:00）に実行
-    - cron: '0 23 * * *'
-  workflow_dispatch: # 手動実行ボタン用
+    - cron: '0 15 * * *' # 毎日日本時間24:00実行
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out repository
+        uses: actions/checkout@v3
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -24,6 +25,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SITE7_COOKIE: ${{ secrets.SITE7_COOKIE }}
         run: |
           node dmm_scraper.js || true
           node pachi_scraper.js || true
