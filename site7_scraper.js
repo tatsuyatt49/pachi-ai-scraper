@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet リンク全自動検出取得モード ===');
+  console.log('=== DeltaNet 全フレーム＆UA偽装取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -28,6 +28,10 @@ async function runDeltaNetScraper() {
   });
 
   const page = await browser.newPage();
+  
+  // User-Agentを一般的なPCブラウザに偽装
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  await page.setViewport({ width: 1280, height: 800 });
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
@@ -35,33 +39,31 @@ async function runDeltaNetScraper() {
 
     try {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      await page.goto(hallUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(hallUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      // リンク判定条件を拡大（ナビ系を除外した全内部リンクを取得）
-      const targetLinks = await page.$$eval('a', (anchors, currentUrl) => {
-        const links = [];
-        const ignoreKeywords = ['Top.do', 'FAQ', 'Mypage', 'Login', 'rule', 'privacy', 'index'];
+      // 全フレーム（iframe含む）からリンクを収集
+      const collectedLinks = new Set();
+      const frames = page.frames();
 
-        for (const a of anchors) {
-          const href = a.getAttribute('href');
-          const text = (a.textContent || '').trim();
-
-          if (!href || href === '#' || href.startsWith('javascript:void')) continue;
-
-          const isIgnore = ignoreKeywords.some(kw => href.includes(kw));
-          if (!isIgnore && (href.includes('do') || href.includes('hall') || text.includes('出玉') || text.includes('データ'))) {
-            const fullUrl = href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
-            if (fullUrl !== currentUrl && !links.includes(fullUrl)) {
-              links.push(fullUrl);
-            }
-          }
+      for (const frame of frames) {
+        try {
+          const frameLinks = await frame.$$eval('a', anchors => {
+            return anchors.map(a => {
+              const href = a.getAttribute('href');
+              if (!href || href.startsWith('javascript') || href === '#') return null;
+              return href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
+            }).filter(Boolean);
+          });
+          frameLinks.forEach(link => collectedLinks.add(link));
+        } catch (e) {
+          // フレームアクセスのエラーはスキップ
         }
-        return links;
-      }, hallUrl);
+      }
 
+      const targetLinks = Array.from(collectedLinks);
       console.log(`[${hall.name}] 検出した対象リンク数: ${targetLinks.length} 個`);
 
-      // 万が一リンクが取れない場合はトップページ自体を解析候補に追加
+      // リンクが取得できない場合のフォールバック（直接トップ画面を解析）
       if (targetLinks.length === 0) {
         targetLinks.push(hallUrl);
       }
@@ -72,44 +74,47 @@ async function runDeltaNetScraper() {
         try {
           await page.goto(targetLinks[i], { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-          const rows = await page.$$eval('tr, div', elements => 
-            elements.map(el => el.innerText ? el.innerText.replace(/\s+/g, ' ').trim() : '')
-          );
+          // メイン画面＋フレーム両方からテキスト取得
+          for (const frame of page.frames()) {
+            const rows = await frame.$$eval('tr, div, td', elements => 
+              elements.map(el => el.innerText ? el.innerText.replace(/\s+/g, ' ').trim() : '')
+            );
 
-          for (const text of rows) {
-            if (!text) continue;
+            for (const text of rows) {
+              if (!text) continue;
 
-            const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
-                          text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
+              const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
+                            text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
-            if (match) {
-              const machineNo = match[1];
-              const totalGames = Number(match[2] || 0);
-              const bbCount = Number(match[3] || 0);
-              const rbCount = Number(match[4] || 0);
+              if (match) {
+                const machineNo = match[1];
+                const totalGames = Number(match[2] || 0);
+                const bbCount = Number(match[3] || 0);
+                const rbCount = Number(match[4] || 0);
 
-              if (totalGames > 0 || bbCount > 0) {
-                const outCoins = totalGames * 3;
-                const inCoins = (bbCount * 240) + (rbCount * 96);
-                const diffCoins = inCoins - outCoins;
+                if (totalGames > 0 || bbCount > 0) {
+                  const outCoins = totalGames * 3;
+                  const inCoins = (bbCount * 240) + (rbCount * 96);
+                  const diffCoins = inCoins - outCoins;
 
-                scrapedRecords.push({
-                  date: today,
-                  hall_id: hall.id,
-                  hall_name: hall.name,
-                  machine_no: machineNo,
-                  model_name: '対象機種',
-                  total_games: totalGames,
-                  bb_count: bbCount,
-                  rb_count: rbCount,
-                  diff_coins: diffCoins,
-                  updated_at: new Date()
-                });
+                  scrapedRecords.push({
+                    date: today,
+                    hall_id: hall.id,
+                    hall_name: hall.name,
+                    machine_no: machineNo,
+                    model_name: '対象機種',
+                    total_games: totalGames,
+                    bb_count: bbCount,
+                    rb_count: rbCount,
+                    diff_coins: diffCoins,
+                    updated_at: new Date()
+                  });
+                }
               }
             }
           }
         } catch (e) {
-          // 個別リンク読み込みエラーはスキップ
+          // 個別ページの取得エラーは無視
         }
       }
 
