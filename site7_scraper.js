@@ -2,6 +2,9 @@ const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
+// 待機用ヘルパー関数
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // Node.js 20環境用 Supabase初期化
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -19,7 +22,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet 追従＆確実遷移モード ===');
+  console.log('=== DeltaNet 追従＆確実遷移モード (待機関数修正版) ===');
   const today = new Date().toISOString().split('T')[0];
 
   const browser = await puppeteer.launch({
@@ -36,9 +39,8 @@ async function runDeltaNetScraper() {
 
     try {
       const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      // リダイレクト完了までしっかり待機 (networkidle0)
       await page.goto(hallUrl, { waitUntil: 'networkidle0', timeout: 35000 });
-      await page.waitForTimeout(3000); // 描画待機
+      await delay(3000);
 
       // テキストデータ解析関数
       const parsePageData = async () => {
@@ -77,10 +79,10 @@ async function runDeltaNetScraper() {
         }
       };
 
-      // 1. 転送先初期ページのテキスト解析
+      // 1. 初期表示データ抽出
       await parsePageData();
 
-      // 2. DOM全体からクリック可能な全要素のセレクタを取得
+      // 2. 画面上の全要素から要素位置を特定
       const clickables = await page.evaluate(() => {
         const els = Array.from(document.querySelectorAll('a, button, input, div[onclick], tr[onclick]'));
         return els.map((el, index) => ({
@@ -92,7 +94,7 @@ async function runDeltaNetScraper() {
 
       console.log(`[${hall.name}] 発見したクリック候補要素: ${clickables.length} 個`);
 
-      // 3. 候補要素を順番に叩いて巡回
+      // 3. 候補要素を順次操作
       const limit = Math.min(clickables.length, 8);
       for (let i = 0; i < limit; i++) {
         try {
@@ -101,10 +103,10 @@ async function runDeltaNetScraper() {
             if (els[idx]) els[idx].click();
           }, clickables[i].index);
 
-          await page.waitForTimeout(2000);
+          await delay(2000);
           await parsePageData();
         } catch (e) {
-          // 単一要素のクリックエラーはスキップ
+          // エラーはスキップ
         }
       }
 
