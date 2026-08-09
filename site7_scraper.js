@@ -19,41 +19,41 @@ const TARGET_HALLS = [
 ];
 
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (高速直接通信版) ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (ScraperAPI・日本プロキシ版) ===');
   const today = new Date().toISOString().split('T')[0];
   const cookie = process.env.SITE7_COOKIE;
+  const apiKey = process.env.SCRAPERAPI_KEY;
 
-  if (!cookie) {
-    console.warn('⚠️ SITE7_COOKIE が設定されていません。');
+  if (!apiKey) {
+    console.error('❌ エラー: SCRAPERAPI_KEY が設定されていません。GitHub Secretsを確認してください。');
+    return;
   }
-
-  // サイトセブンが403を出さずにレスポンスを返すための完全なヘッダー構成
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Accept-Language': 'ja-JP,ja;q=0.9',
-    'Referer': 'https://m.site777.jp/f/D0300.do',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Cookie': cookie || ''
-  };
 
   for (const hall of TARGET_HALLS) {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
-      // site777の無料版JSONレスポンス用URL
-      const targetUrl = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
-      
-      const response = await axios.get(targetUrl, {
-        headers: headers,
-        timeout: 8000 // 8秒でタイムアウト設定
+      const site7Url = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
+
+      // ScraperAPIエンドポイントを構築（日本プロキシ指定: country_code=jp, ヘッダー保持: keep_headers=true）
+      const proxyApiUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(site7Url)}&country_code=jp&keep_headers=true`;
+
+      const response = await axios.get(proxyApiUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Accept-Language': 'ja-JP,ja;q=0.9',
+          'Referer': 'https://m.site777.jp/f/D0300.do',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Cookie': cookie || ''
+        },
+        timeout: 30000
       });
 
       const rawData = response.data;
       let scrapedRecords = [];
 
       if (typeof rawData === 'object' && rawData !== null) {
-        // レスポンスがJSONの場合の解析
         const list = rawData.machines || rawData.list || [];
         scrapedRecords = list.map(item => {
           const outCoins = (item.total_games || 0) * 3;
