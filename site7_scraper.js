@@ -1,11 +1,15 @@
 const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
 
-// Supabase初期化（Supabase Clientの接続エラー回避設定）
+// Node.js 20環境用：wsを明示的に指定してSupabase初期化
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) 
-  ? createClient(supabaseUrl, supabaseKey)
+  ? createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false },
+      realtime: { transport: WebSocket }
+    })
   : null;
 
 const TARGET_HALLS = [
@@ -84,7 +88,7 @@ async function runDeltaNetScraper() {
             }
           }
         } catch (e) {
-          // 個別エラーは無視して次へ
+          // 個別エラーは無視
         }
       }
 
