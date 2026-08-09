@@ -27,7 +27,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           SITE7_COOKIE: ${{ secrets.SITE7_COOKIE }}
           SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-        run: |
-          node dmm_scraper.js || true
-          node pachi_scraper.js || true
-          node site7_scraper.js || true
+        run: 
+          node dmm_scraper.js
