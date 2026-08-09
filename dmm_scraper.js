@@ -7,8 +7,8 @@ const TARGET_HALL = {
   url: 'https://ana-slo.com/ホールデータ/千葉県/マルハン千葉みなと店-データ一覧/' 
 };
 
-async function investigateStructure() {
-  console.log('=== アナスロ 構造徹底調査モード開始 ===');
+async function dumpHtml() {
+  console.log('=== アナスロ ページテキスト確認モード ===');
 
   const browser = await puppeteer.launch({
     headless: "new",
@@ -20,38 +20,26 @@ async function investigateStructure() {
 
   try {
     console.log(`アクセス中: ${TARGET_HALL.url}`);
-    await page.goto(TARGET_HALL.url, { waitUntil: 'domcontentloaded', timeout: 40000 });
-    await new Promise(r => setTimeout(r, 6000)); // しっかり待つ
+    await page.goto(TARGET_HALL.url, { waitUntil: 'networkidle2', timeout: 40000 });
+    
+    // データの動的描画をしっかり待つ
+    await new Promise(r => setTimeout(r, 7000));
 
-    // ページ内にあるテーブルや主要な要素の構造を丸裸にしてログに出力
-    const structureInfo = await page.evaluate(() => {
-      const tables = Array.from(document.querySelectorAll('table')).map((t, i) => {
-        return {
-          tableIndex: i,
-          className: t.className,
-          id: t.id,
-          rowCount: t.rows.length,
-          firstRowText: t.rows.length > 0 ? t.rows[0].innerText.replace(/\s+/g, ' ').substring(0, 80) : ''
-        };
-      });
-
-      const divs = Array.from(document.querySelectorAll('div')).filter(d => d.innerText.includes('G') && d.innerText.length < 500).slice(0, 5).map(d => ({
-        className: d.className,
-        textSnippet: d.innerText.replace(/\s+/g, ' ').substring(0, 80)
-      }));
-
-      return { tables, divs };
+    // ページ全体のテキストを抽出して冒頭部分をログに出力
+    const bodyText = await page.evaluate(() => {
+      return document.body ? document.body.innerText : 'BODY_NULL';
     });
 
-    console.log('【検出されたテーブル一覧】\n', JSON.stringify(structureInfo.tables, null, 2));
-    console.log('【検出された候補Div一覧】\n', JSON.stringify(structureInfo.divs, null, 2));
+    console.log('--- 取得できたページ内テキスト（冒頭抜粋） ---');
+    console.log(bodyText.substring(0, 2000));
+    console.log('--------------------------------------------');
 
   } catch (error) {
-    console.error('調査エラー:', error.message);
+    console.error('エラー:', error.message);
   } finally {
     await browser.close();
-    console.log('=== 調査終了 ===');
+    console.log('=== 終了 ===');
   }
 }
 
-investigateStructure();
+dumpHtml();
