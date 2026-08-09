@@ -19,7 +19,7 @@ const TARGET_HALLS = [
 ];
 
 async function runSite7Scraper() {
-  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (ScraperAPI・日本プロキシ版) ===');
+  console.log('=== site7 3店舗 台データ＆差枚 収集開始 (ScraperAPI・解析調整版) ===');
   const today = new Date().toISOString().split('T')[0];
   const cookie = process.env.SITE7_COOKIE;
   const apiKey = process.env.SCRAPERAPI_KEY;
@@ -34,8 +34,6 @@ async function runSite7Scraper() {
 
     try {
       const site7Url = `https://m.site777.jp/f/D0300.do?pmc=${hall.id}&clc=03`;
-
-      // ScraperAPIエンドポイントを構築（日本プロキシ指定: country_code=jp, ヘッダー保持: keep_headers=true）
       const proxyApiUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(site7Url)}&country_code=jp&keep_headers=true`;
 
       const response = await axios.get(proxyApiUrl, {
@@ -50,32 +48,50 @@ async function runSite7Scraper() {
         timeout: 30000
       });
 
-      const rawData = response.data;
+      let rawData = response.data;
+      if (typeof rawData === 'string') {
+        try {
+          rawData = JSON.parse(rawData);
+        } catch (e) {
+          console.log(`[${hall.name}] レスポンス冒頭(100文字):`, rawData.substring(0, 100));
+        }
+      }
+
       let scrapedRecords = [];
 
       if (typeof rawData === 'object' && rawData !== null) {
-        const list = rawData.machines || rawData.list || [];
-        scrapedRecords = list.map(item => {
-          const outCoins = (item.total_games || 0) * 3;
-          const inCoins = ((item.bb_count || 0) * 240) + ((item.rb_count || 0) * 96);
-          const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
+        // 多様なレスポンスキーに対応
+        const list = rawData.machines || rawData.list || rawData.data || rawData.daidata || [];
+        
+        if (Array.isArray(list) && list.length > 0) {
+          scrapedRecords = list.map(item => {
+            const totalGames = Number(item.total_games || item.gcount || item.total_g || 0);
+            const bbCount = Number(item.bb_count || item.bb || 0);
+            const rbCount = Number(item.rb_count || item.rb || 0);
+            
+            const outCoins = totalGames * 3;
+            const inCoins = (bbCount * 240) + (rbCount * 96);
+            const diffCoins = item.diff_coins !== undefined ? Number(item.diff_coins) : (inCoins - outCoins);
 
-          return {
-            date: today,
-            hall_id: hall.id,
-            hall_name: hall.name,
-            machine_no: item.machine_no || item.daiban,
-            model_name: item.model_name || item.kisyu_name || '不明機種',
-            total_games: Number(item.total_games || item.gcount || 0),
-            bb_count: Number(item.bb_count || item.bb || 0),
-            rb_count: Number(item.rb_count || item.rb || 0),
-            diff_coins: diffCoins,
-            updated_at: new Date()
-          };
-        });
+            return {
+              date: today,
+              hall_id: hall.id,
+              hall_name: hall.name,
+              machine_no: String(item.machine_no || item.daiban || item.台番号 || ''),
+              model_name: item.model_name || item.kisyu_name || item.機種名 || '不明機種',
+              total_games: totalGames,
+              bb_count: bbCount,
+              rb_count: rbCount,
+              diff_coins: diffCoins,
+              updated_at: new Date()
+            };
+          }).filter(r => r.machine_no !== '');
+        } else {
+          console.log(`[${hall.name}] 受信データオブジェクトのキー一覧:`, Object.keys(rawData));
+        }
       }
 
-      console.log(`[${hall.name}] 取得完了: ${scrapedRecords.length} 件`);
+      console.log(`[${hall.name}] 取得成功: ${scrapedRecords.length} 件`);
 
       if (supabase && scrapedRecords.length > 0) {
         const { error } = await supabase
@@ -85,7 +101,7 @@ async function runSite7Scraper() {
         if (error) {
           console.error(`[${hall.name}] Supabase保存エラー:`, error.message);
         } else {
-          console.log(`[${hall.name}] Supabaseへ保存成功！`);
+          console.log(`[${hall.name}] Supabaseへ保存完了！`);
         }
       }
     } catch (error) {
