@@ -2,34 +2,13 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
-const { createClient } = require('@supabase/supabase-js');
-const WebSocket = require('ws');
+const TARGET_HALL = { 
+  name: 'マルハン千葉みなと店', 
+  url: 'https://ana-slo.com/ホールデータ/千葉県/マルハン千葉みなと店-データ一覧/' 
+};
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = (supabaseUrl && supabaseKey)
-  ? createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false },
-      realtime: { transport: WebSocket }
-    })
-  : null;
-
-const TARGET_HALLS = [
-  { 
-    name: 'パラッツォ船橋店', 
-    id: '13130009', 
-    url: 'https://ana-slo.com/ホールデータ/千葉県/パラッツォ船橋店-データ一覧/' 
-  },
-  { 
-    name: 'マルハン千葉みなと店', 
-    id: '10015018', 
-    url: 'https://ana-slo.com/ホールデータ/千葉県/マルハン千葉みなと店-データ一覧/' 
-  }
-];
-
-async function runDmmScraper() {
-  console.log('【アナスロ】データ抽出・待機強化版を開始...');
-  const today = new Date().toISOString().split('T')[0];
+async function investigateStructure() {
+  console.log('=== アナスロ 構造徹底調査モード開始 ===');
 
   const browser = await puppeteer.launch({
     headless: "new",
@@ -39,85 +18,40 @@ async function runDmmScraper() {
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-  for (const hall of TARGET_HALLS) {
-    console.log(`\n▶ アクセス中: ${hall.name}`);
-    const scrapedRecords = [];
+  try {
+    console.log(`アクセス中: ${TARGET_HALL.url}`);
+    await page.goto(TARGET_HALL.url, { waitUntil: 'domcontentloaded', timeout: 40000 });
+    await new Promise(r => setTimeout(r, 6000)); // しっかり待つ
 
-    try {
-      // ネットワーク通信が落ち着くまでしっかり待つ
-      await page.goto(hall.url, { waitUntil: 'networkidle0', timeout: 45000 });
-      
-      // テーブル要素が画面に出現するまで最大10秒待機
-      try {
-        await page.waitForSelector('table', { timeout: 10000 });
-      } catch (e) {
-        console.log(`${hall.name}: テーブル要素の待機タイムアウト。追加で待機します...`);
-      }
-      
-      // 念のためさらに4秒待機して描画を確実に完了させる
-      await new Promise(r => setTimeout(r, 4000));
-
-      // ページ内のすべてのテーブル行（tr）からテキストを抽出
-      const rowsData = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll('tr'));
-        return rows.map(r => r.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    // ページ内にあるテーブルや主要な要素の構造を丸裸にしてログに出力
+    const structureInfo = await page.evaluate(() => {
+      const tables = Array.from(document.querySelectorAll('table')).map((t, i) => {
+        return {
+          tableIndex: i,
+          className: t.className,
+          id: t.id,
+          rowCount: t.rows.length,
+          firstRowText: t.rows.length > 0 ? t.rows[0].innerText.replace(/\s+/g, ' ').substring(0, 80) : ''
+        };
       });
 
-      console.log(`${hall.name}: 検出したテーブル行数 = ${rowsData.length} 行`);
+      const divs = Array.from(document.querySelectorAll('div')).filter(d => d.innerText.includes('G') && d.innerText.length < 500).slice(0, 5).map(d => ({
+        className: d.className,
+        textSnippet: d.innerText.replace(/\s+/g, ' ').substring(0, 80)
+      }));
 
-      for (const line of rowsData) {
-        // 台番号、ゲーム数、BB、RBの並びをマッチング
-        const match = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
+      return { tables, divs };
+    });
 
-        if (match) {
-          const machineNo = match[1];
-          const totalGames = Number(match[2]);
-          const bbCount = Number(match[3]);
-          const rbCount = Number(match[4]);
+    console.log('【検出されたテーブル一覧】\n', JSON.stringify(structureInfo.tables, null, 2));
+    console.log('【検出された候補Div一覧】\n', JSON.stringify(structureInfo.divs, null, 2));
 
-          if (totalGames >= 0 && totalGames <= 12000 && bbCount <= 100 && rbCount <= 100) {
-            const outCoins = totalGames * 3;
-            const inCoins = (bbCount * 240) + (rbCount * 96);
-            const diffCoins = inCoins - outCoins;
-
-            scrapedRecords.push({
-              date: today,
-              hall_id: hall.id,
-              hall_name: hall.name,
-              machine_no: machineNo,
-              model_name: '対象機種',
-              total_games: totalGames,
-              bb_count: bbCount,
-              rb_count: rbCount,
-              diff_coins: diffCoins,
-              updated_at: new Date()
-            });
-          }
-        }
-      }
-
-      const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
-      console.log(`${hall.name}: 抽出成功した有効データ数 = ${uniqueRecords.length} 件`);
-
-      if (supabase && uniqueRecords.length > 0) {
-        const { error } = await supabase
-          .from('site7_daidata')
-          .upsert(uniqueRecords, { onConflict: 'date, hall_id, machine_no' });
-
-        if (error) {
-          console.error(`${hall.name} Supabase保存エラー:`, error.message);
-        } else {
-          console.log(`${hall.name} Supabaseへ保存成功！`);
-        }
-      }
-
-    } catch (error) {
-      console.error(`${hall.name} 処理エラー:`, error.message);
-    }
+  } catch (error) {
+    console.error('調査エラー:', error.message);
+  } finally {
+    await browser.close();
+    console.log('=== 調査終了 ===');
   }
-
-  await browser.close();
-  console.log('処理完了。ブラウザを閉じました。');
 }
 
-runDmmScraper();
+investigateStructure();
