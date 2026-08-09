@@ -6,88 +6,96 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
-// ランダム遅延関数（ミリ秒）
+// 遅延処理＆ヘッダー（ガード回避用）
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const getRandomDelay = (min = 1200, max = 3500) => Math.floor(Math.random() * (max - min + 1)) + min;
+const getRandomDelay = (min = 1500, max = 3000) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-// ブラウザ完全模倣用ヘッダー設定
 const DEFAULT_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
   'Referer': 'https://m.daidata.com/',
-  'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-  'Sec-Ch-Ua-Mobile': '?0',
-  'Sec-Ch-Ua-Platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
   'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
 };
 
-// ガード回避機能付きデータ取得関数
 async function fetchWithGuardBypass(url, options = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
-      // 1. 人間らしいアクセス間隔を再現（ランダム待機）
       await delay(getRandomDelay());
-
       const response = await axios({
         url,
         ...options,
-        headers: {
-          ...DEFAULT_HEADERS,
-          ...options.headers,
-        },
+        headers: { ...DEFAULT_HEADERS, ...options.headers },
         timeout: 15000,
       });
-
       return response.data;
     } catch (error) {
-      const status = error.response ? error.response.status : null;
-      console.warn(`[試行 ${i + 1}/${retries}] 通信エラー: ${status || error.message}`);
-
-      // 2. ブロック検知（403/429）時は指数バックオフ（3秒、6秒...と待機時間を倍増）
-      if (status === 403 || status === 429 || i < retries - 1) {
-        const waitTime = (i + 1) * 3000;
-        console.log(`ブロック回避のため ${waitTime / 1000} 秒待機して再試行します...`);
-        await delay(waitTime);
-      } else {
-        throw error;
-      }
+      if (i === retries - 1) throw error;
+      await delay((i + 1) * 3000);
     }
   }
-  throw new Error('最大再試行回数に達しました。');
+}
+
+// 差枚数計算・補正ヘルパー関数
+function calculateDiffDifference(games, bb, rb, rawDiff) {
+  if (rawDiff !== undefined && rawDiff !== null) return Number(rawDiff);
+  // 差枚データが直接とれない場合の推計（必要に応じて調整）
+  const outCoins = games * 3;
+  const inCoins = (bb * 240) + (rb * 96); // 概算値
+  return inCoins - outCoins;
 }
 
 async function runSite7Scraper() {
-  console.log('=== site7 データ収集開始 ===');
+  console.log('=== site7 台データ＆差枚 収集開始 ===');
 
   try {
-    // 収集対象のデータエンドポイントURL
-    const targetUrl = 'https://m.daidata.com/search/hall/detail'; // 対象API/URLへ変更してください
+    // ※対象ホールのエンドポイントまたはAPIに置き換えて使用します
+    const targetUrl = 'https://m.daidata.com/search/hall/detail';
+    const requestHeaders = process.env.SITE7_COOKIE ? { 'Cookie': process.env.SITE7_COOKIE } : {};
 
-    const requestHeaders = {};
-    // Cookie情報が設定されていればセット
-    if (process.env.SITE7_COOKIE) {
-      requestHeaders['Cookie'] = process.env.SITE7_COOKIE;
-    }
-
-    // データ取得実行
-    const data = await fetchWithGuardBypass(targetUrl, {
+    const rawData = await fetchWithGuardBypass(targetUrl, {
       method: 'GET',
       headers: requestHeaders,
     });
 
-    console.log('データ取得成功:', data ? 'データあり' : '空データ');
+    // テストサンプルデータ（実際のレスポンス形式に合わせてパース処理を調整）
+    const today = new Date().toISOString().split('T')[0];
+    const scrapedRecords = (rawData?.machines || [
+      // APIフォーマットに合わせた構造化データの抽出例
+    ]).map(item => {
+      const diffCoins = calculateDiffDifference(item.total_games, item.bb_count, item.rb_count, item.diff_coins);
+      return {
+        date: today,
+        hall_name: item.hall_name || '対象ホール',
+        machine_no: item.machine_no,        // 台番号（必須）
+        model_name: item.model_name,        // 機種名
+        total_games: item.total_games || 0, // 総回転数
+        bb_count: item.bb_count || 0,       // BIG回数
+        rb_count: item.rb_count || 0,       // REG回数
+        diff_coins: diffCoins,               // 差枚数（必須）
+        updated_at: new Date()
+      };
+    });
 
-    // TODO: 取得データの加工およびSupabaseへの保存処理（DBテーブル設計に合わせて実装）
+    // Supabase DBへの一括保存（台データ・差枚数の保存）
+    if (supabase && scrapedRecords.length > 0) {
+      const { error } = await supabase
+        .from('site7_daidata')
+        .upsert(scrapedRecords, { onConflict: 'date, machine_no' });
+
+      if (error) {
+        console.error('Supabase保存エラー:', error.message);
+      } else {
+        console.log(`Supabaseへ ${scrapedRecords.length} 件の台データ・差枚数を保存完了！`);
+      }
+    } else {
+      console.log('保存対象の台データなし、またはSupabase未接続');
+    }
 
   } catch (error) {
-    console.error('site7 収集処理エラー:', error.message);
-    // システム全体を落とさないようエラーをキャッチ
+    console.error('site7 処理エラー:', error.message);
   }
 
-  console.log('=== site7 データ収集終了 ===');
+  console.log('=== site7 データ収集完了 ===');
 }
 
 runSite7Scraper();
