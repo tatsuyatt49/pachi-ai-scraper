@@ -1,4 +1,3 @@
-// puppeteer-extra と stealth プラグインを使用します
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
@@ -30,17 +29,15 @@ const TARGET_HALLS = [
 ];
 
 async function runAnaSloScraper() {
-  console.log('=== アナスロ経由・Stealth Puppeteerモード ===');
+  console.log('=== アナスロ経由・要素直接取得モード ===');
   const today = new Date().toISOString().split('T')[0];
 
-  // ステルスモードでブラウザを起動
   const browser = await puppeteer.launch({
     headless: "new",
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
 
   const page = await browser.newPage();
-  // 万全を期してユーザーエージェントを一般的なPCに偽装
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
   for (const hall of TARGET_HALLS) {
@@ -48,27 +45,29 @@ async function runAnaSloScraper() {
     const scrapedRecords = [];
 
     try {
-      // ページにアクセス（403を回避）
       await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      // 念のため描画を少し待つ
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
 
-      // 画面上のテキストをまるごと取得して解析
-      const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
-      const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
+      // ページ内のテーブル行（tr）やリストからテキストを個別に取得
+      const rawData = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('tr, .data-row, li'));
+        return rows.map(row => row.innerText.replace(/\s+/g, ' ').trim());
+      });
 
-      for (const line of lines) {
-        // 台データのパターンマッチング
-        const match = line.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
-                      line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
+      console.log(`[${hall.name}] 取得した要素行数: ${rawData.length} 行`);
 
-        if (match) {
-          const machineNo = match[1];
-          const totalGames = Number(match[2] || 0);
-          const bbCount = Number(match[3] || 0);
-          const rbCount = Number(match[4] || 0);
+      for (const line of rawData) {
+        // 連続する数字の塊（台番号、ゲーム数、BB、RBなど）を柔軟にキャッチするパターン
+        const matches = line.match(/(\d{3,4})\D+(\d{1,5})\D+(\d{1,3})\D+(\d{1,3})/);
 
-          if (totalGames > 0 || bbCount > 0) {
+        if (matches) {
+          const machineNo = matches[1];
+          const totalGames = Number(matches[2]);
+          const bbCount = Number(matches[3]);
+          const rbCount = Number(matches[4]);
+
+          // スロットのデータとして現実的な数値範囲のものだけを対象にする
+          if (totalGames >= 0 && totalGames < 15000 && bbCount < 100 && rbCount < 100) {
             const outCoins = totalGames * 3;
             const inCoins = (bbCount * 240) + (rbCount * 96);
             const diffCoins = inCoins - outCoins;
@@ -90,7 +89,7 @@ async function runAnaSloScraper() {
       }
 
       const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
-      console.log(`[${hall.name}] 取得成功: ${uniqueRecords.length} 件`);
+      console.log(`[${hall.name}] 抽出成功: ${uniqueRecords.length} 件`);
 
       if (supabase && uniqueRecords.length > 0) {
         const { error } = await supabase
