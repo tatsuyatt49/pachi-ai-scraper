@@ -1,13 +1,14 @@
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
 
-// Supabase初期化（リアルタイムWebSocket接続を無効化してエラー回避）
+// Supabase初期化（Node.js 20用のWebSocket指定を追加）
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey) 
   ? createClient(supabaseUrl, supabaseKey, {
       auth: { persistSession: false },
-      realtime: { timeout: 0 }
+      realtime: { transport: WebSocket }
     })
   : null;
 
