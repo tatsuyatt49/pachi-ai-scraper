@@ -5,7 +5,6 @@ puppeteer.use(StealthPlugin());
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
-// Supabase初期化（Node.js 20用のWebSocket指定を追加）
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = (supabaseUrl && supabaseKey)
@@ -29,10 +28,9 @@ const TARGET_HALLS = [
 ];
 
 async function runDmmScraper() {
-  console.log('【DMMぱちタウン / アナスロ】データ取得＆DB保存処理を開始...');
+  console.log('【アナスロ】データ抽出・デバッグモード開始...');
   const today = new Date().toISOString().split('T')[0];
 
-  // ステルスモードでブラウザを起動して403ブロックを回避
   const browser = await puppeteer.launch({
     headless: "new",
     args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -42,28 +40,32 @@ async function runDmmScraper() {
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
   for (const hall of TARGET_HALLS) {
-    console.log(`\nアクセス中: ${hall.name} (${hall.url})`);
+    console.log(`\n▶ アクセス中: ${hall.name}`);
     const scrapedRecords = [];
 
     try {
-      await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      await new Promise(r => setTimeout(r, 3000));
+      await page.goto(hall.url, { waitUntil: 'domcontentloaded', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 4000));
 
-      // ページのテキストを抽出して解析
-      const pageText = await page.evaluate(() => document.body ? document.body.innerText : '');
-      const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
+      // ページ内のすべてのテキスト行を取得
+      const textContent = await page.evaluate(() => document.body ? document.body.innerText : '');
+      const lines = textContent.split('\n').map(l => l.trim()).filter(Boolean);
 
+      console.log(`${hall.name}: 取得した総行数 = ${lines.length} 行`);
+
+      let matchedCount = 0;
       for (const line of lines) {
-        const match = line.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
-                      line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
+        // 台番号とゲーム数、BB、RBが含まれる行を探索
+        const match = line.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
 
         if (match) {
+          matchedCount++;
           const machineNo = match[1];
-          const totalGames = Number(match[2] || 0);
-          const bbCount = Number(match[3] || 0);
-          const rbCount = Number(match[4] || 0);
+          const totalGames = Number(match[2]);
+          const bbCount = Number(match[3]);
+          const rbCount = Number(match[4]);
 
-          if (totalGames > 0 || bbCount > 0) {
+          if (totalGames >= 0 && totalGames <= 12000) {
             const outCoins = totalGames * 3;
             const inCoins = (bbCount * 240) + (rbCount * 96);
             const diffCoins = inCoins - outCoins;
@@ -84,8 +86,9 @@ async function runDmmScraper() {
         }
       }
 
+      console.log(`${hall.name}: パターンマッチした行数 = ${matchedCount} 件`);
       const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
-      console.log(`${hall.name}: 抽出されたデータ数: ${uniqueRecords.length}件`);
+      console.log(`${hall.name}: 最終有効データ数 = ${uniqueRecords.length} 件`);
 
       if (supabase && uniqueRecords.length > 0) {
         const { error } = await supabase
