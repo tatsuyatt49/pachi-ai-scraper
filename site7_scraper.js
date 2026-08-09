@@ -13,7 +13,6 @@ const supabase = (supabaseUrl && supabaseKey)
     })
   : null;
 
-// 対象ホール一覧（DeltaNet用コード）
 const TARGET_HALLS = [
   { name: 'パラッツォ船橋店パートII', id: '13130009' },
   { name: 'スーパーＤ’ステーション千葉みなと店', id: '10019024' },
@@ -21,7 +20,7 @@ const TARGET_HALLS = [
 ];
 
 async function runDeltaNetScraper() {
-  console.log('=== DeltaNet (d-deltanet.com) 台データ＆差枚 収集開始 ===');
+  console.log('=== DeltaNet (d-deltanet.com) 全機種巡回・台データ収集開始 ===');
   const today = new Date().toISOString().split('T')[0];
   const apiKey = process.env.SCRAPERAPI_KEY;
 
@@ -34,57 +33,79 @@ async function runDeltaNetScraper() {
     console.log(`\n▶ [${hall.name}] (ID: ${hall.id}) データ収集開始...`);
 
     try {
-      // PC版 DeltaNet の正解URL
-      const deltaUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
-      const proxyApiUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(deltaUrl)}&country_code=jp`;
+      // 1. 店舗の機種一覧ページを取得
+      const hallUrl = `https://www.d-deltanet.com/pc/HallSelectLink.do?hallcode=${hall.id}`;
+      const proxyHallUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(hallUrl)}&country_code=jp`;
 
-      const response = await axios.get(proxyApiUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        },
-        timeout: 30000
-      });
+      const hallRes = await axios.get(proxyHallUrl, { timeout: 30000 });
+      const $hall = cheerio.load(hallRes.data);
 
-      const $ = cheerio.load(response.data);
-      const scrapedRecords = [];
-
-      // テーブルやリスト行からデータ抽出
-      $('tr, table, div, li').each((_, element) => {
-        const text = $(element).text().replace(/\s+/g, ' ').trim();
-        
-        // 「台番号」「総ゲーム数」「BB」「RB」のパターンを検知
-        const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
-                      text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
-
-        if (match) {
-          const machineNo = match[1];
-          const totalGames = Number(match[2] || 0);
-          const bbCount = Number(match[3] || 0);
-          const rbCount = Number(match[4] || 0);
-
-          if (totalGames > 0 || bbCount > 0) {
-            const outCoins = totalGames * 3;
-            const inCoins = (bbCount * 240) + (rbCount * 96);
-            const diffCoins = inCoins - outCoins;
-
-            scrapedRecords.push({
-              date: today,
-              hall_id: hall.id,
-              hall_name: hall.name,
-              machine_no: machineNo,
-              model_name: '対象機種',
-              total_games: totalGames,
-              bb_count: bbCount,
-              rb_count: rbCount,
-              diff_coins: diffCoins,
-              updated_at: new Date()
-            });
+      // 各機種の「出玉データ」リンク（URL）をすべて収集
+      const modelLinks = [];
+      $hall('a').each((_, el) => {
+        const href = $hall(el).attr('href');
+        const text = $hall(el).text().trim();
+        if (href && (href.includes('Dadata') || href.includes('Hall') || text.includes('出玉データ'))) {
+          const fullUrl = href.startsWith('http') ? href : `https://www.d-deltanet.com/pc/${href.replace(/^\//, '')}`;
+          if (!modelLinks.includes(fullUrl)) {
+            modelLinks.push(fullUrl);
           }
         }
       });
 
-      // 重複台の除去
+      console.log(`[${hall.name}] 発見した機種ページ数: ${modelLinks.length} 件`);
+
+      const scrapedRecords = [];
+
+      // 2. 収集したリンク（または直接全体をループ）から台データを解析
+      // リンクが取れない場合のバックアップとして直接全体テキストもパース
+      const targetsToScrape = modelLinks.length > 0 ? modelLinks.slice(0, 15) : [hallUrl];
+
+      for (const targetUrl of targetsToScrape) {
+        try {
+          const proxyTargetUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&country_code=jp`;
+          const pageRes = await axios.get(proxyTargetUrl, { timeout: 20000 });
+          const $page = cheerio.load(pageRes.data);
+
+          $page('tr, div, table').each((_, element) => {
+            const text = $page(element).text().replace(/\s+/g, ' ').trim();
+            
+            // 台番号、ゲーム数、BB、RB等の数値パターン
+            const match = text.match(/(\d{3,4})\s*番台?.*?(\d+)\s*G.*?(\d+)\s*回.*?(\d+)\s*回/i) ||
+                          text.match(/(\d{3,4})\s+(\d+)\s+(\d+)\s+(\d+)/);
+
+            if (match) {
+              const machineNo = match[1];
+              const totalGames = Number(match[2] || 0);
+              const bbCount = Number(match[3] || 0);
+              const rbCount = Number(match[4] || 0);
+
+              if (totalGames > 0 || bbCount > 0) {
+                const outCoins = totalGames * 3;
+                const inCoins = (bbCount * 240) + (rbCount * 96);
+                const diffCoins = inCoins - outCoins;
+
+                scrapedRecords.push({
+                  date: today,
+                  hall_id: hall.id,
+                  hall_name: hall.name,
+                  machine_no: machineNo,
+                  model_name: '対象機種',
+                  total_games: totalGames,
+                  bb_count: bbCount,
+                  rb_count: rbCount,
+                  diff_coins: diffCoins,
+                  updated_at: new Date()
+                });
+              }
+            }
+          });
+        } catch (e) {
+          // 個別ページエラーはスキップして次へ
+        }
+      }
+
+      // 重複削除
       const uniqueRecords = Array.from(new Map(scrapedRecords.map(item => [item.machine_no, item])).values());
 
       console.log(`[${hall.name}] 取得成功: ${uniqueRecords.length} 件`);
